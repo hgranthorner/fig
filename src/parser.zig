@@ -128,6 +128,28 @@ pub fn Parser(T: type) type {
 
             return Parser(U).init(runner.run);
         }
+
+        pub fn apply(self: Self, U: type, other: Parser(U)) Parser(std.meta.Tuple(&[_]type{ T, U })) {
+            const Tuple = std.meta.Tuple(&[_]type{ T, U });
+            const runner = struct {
+                const Result = ParseResult(Tuple);
+                pub fn run(input: Input) Result {
+                    const result = self.run(input);
+                    return switch (result.value) {
+                        .err => |parse_err| Result.err(input, parse_err),
+                        .value => |val| {
+                            const other_result = other.run(result.remaining);
+                            return switch (other_result.value) {
+                                .err => |parse_err| Result.err(result.remaining, parse_err),
+                                .value => |other_val| Result.ok(other_result.remaining, .{ val, other_val }),
+                            };
+                        },
+                    };
+                }
+            };
+
+            return Parser(Tuple).init(runner.run);
+        }
     };
 }
 
@@ -243,6 +265,37 @@ test "takeRight" {
     switch (result.value) {
         .value => |val| {
             try t.expectEqualStrings("world", val);
+        },
+        .err => try t.expect(false),
+    }
+}
+
+test "Apply" {
+    const parser = Parser([]const u8).init(prefix("hello").run);
+    const other = Parser([]const u8).init(prefix("world").run);
+    const applied = parser.apply([]const u8, other);
+    const result = applied.run(Input.init("helloworld"));
+    try t.expectEqualStrings("", result.remaining.text);
+    switch (result.value) {
+        .value => |val| {
+            try t.expectEqualStrings("hello", val[0]);
+            try t.expectEqualStrings("world", val[1]);
+        },
+        .err => try t.expect(false),
+    }
+}
+
+test "Altogether now" {
+    const hello = Parser([]const u8).init(prefix("hello").run);
+    const space = Parser([]const u8).init(prefix(" ").run);
+    const world = Parser([]const u8).init(prefix("world").run);
+    const parser = hello.takeLeft(space).apply([]const u8, world);
+    const result = parser.run(Input.init("hello world"));
+    try t.expectEqualStrings("", result.remaining.text);
+    switch (result.value) {
+        .value => |val| {
+            try t.expectEqualStrings("hello", val[0]);
+            try t.expectEqualStrings("world", val[1]);
         },
         .err => try t.expect(false),
     }

@@ -69,7 +69,7 @@ pub fn Parser(T: type) type {
 
         run: fn (Input) ParseResult(T),
 
-        pub fn init(run: fn (Input) ParseResult(T)) Self {
+        pub fn init(run: Run(T)) Self {
             return .{
                 .run = run,
             };
@@ -150,6 +150,20 @@ pub fn Parser(T: type) type {
 
             return Parser(Tuple).init(runner.run);
         }
+
+        pub fn alternative(self: Self, other: Self) Self {
+            const runner = struct {
+                pub fn run(input: Input) ParseResult(T) {
+                    const result = self.run(input);
+                    return switch (result.value) {
+                        .value => result,
+                        .err => other.run(input),
+                    };
+                }
+            };
+
+            return Self.init(runner.run);
+        }
     };
 }
 
@@ -166,7 +180,7 @@ pub fn all(input: Input) ParseStringResult {
     );
 }
 
-pub fn prefix(str: []const u8) Runner([]const u8) {
+pub fn string(str: []const u8) Run([]const u8) {
     const runner = struct {
         fn run(input: Input) ParseStringResult {
             if (std.mem.eql(u8, str, input.text[0..str.len])) {
@@ -182,13 +196,15 @@ pub fn prefix(str: []const u8) Runner([]const u8) {
             }
         }
     };
-    return .{ .run = runner.run };
+    return runner.run;
 }
 
 const t = std.testing;
 
+const StringParser = Parser([]const u8);
+
 test "Can create and run a parser" {
-    const parser = Parser([]const u8).init(identity);
+    const parser = StringParser.init(identity);
     const result = parser.run(Input.init("hello world"));
 
     switch (result.value) {
@@ -198,7 +214,7 @@ test "Can create and run a parser" {
 }
 
 test "Can map over a parser" {
-    const parser = Parser([]const u8).init(all);
+    const parser = StringParser.init(all);
     const mapper = struct {
         pub fn map(text: []const u8) !u32 {
             return std.fmt.parseInt(u32, text, 0);
@@ -219,7 +235,7 @@ test "Can map over a parser" {
 }
 
 test "Prefix" {
-    const parser = Parser([]const u8).init(prefix("hello").run);
+    const parser = StringParser.init(string("hello"));
     const result = parser.run(Input.init("hello world"));
     try t.expectEqualStrings(" world", result.remaining.text);
     try t.expectEqual(5, result.remaining.pos);
@@ -232,7 +248,7 @@ test "Prefix" {
 }
 
 test "Prefix fails" {
-    const parser = Parser([]const u8).init(prefix("hello").run);
+    const parser = StringParser.init(string("hello"));
     const result = parser.run(Input.init("world"));
     try t.expectEqualStrings("world", result.remaining.text);
     try t.expectEqual(0, result.remaining.pos);
@@ -245,8 +261,8 @@ test "Prefix fails" {
 }
 
 test "takeLeft" {
-    const parser = Parser([]const u8).init(prefix("hello").run);
-    const other = Parser([]const u8).init(prefix(" world").run);
+    const parser = StringParser.init(string("hello"));
+    const other = StringParser.init(string(" world"));
     const result = parser.takeLeft(other).run(Input.init("hello world"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {
@@ -258,8 +274,8 @@ test "takeLeft" {
 }
 
 test "takeRight" {
-    const parser = Parser([]const u8).init(prefix(" ").run);
-    const other = Parser([]const u8).init(prefix("world").run);
+    const parser = StringParser.init(string(" "));
+    const other = StringParser.init(string("world"));
     const result = parser.takeRight([]const u8, other).run(Input.init(" world"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {
@@ -271,8 +287,8 @@ test "takeRight" {
 }
 
 test "Apply" {
-    const parser = Parser([]const u8).init(prefix("hello").run);
-    const other = Parser([]const u8).init(prefix("world").run);
+    const parser = StringParser.init(string("hello"));
+    const other = StringParser.init(string("world"));
     const applied = parser.apply([]const u8, other);
     const result = applied.run(Input.init("helloworld"));
     try t.expectEqualStrings("", result.remaining.text);
@@ -286,9 +302,9 @@ test "Apply" {
 }
 
 test "Altogether now" {
-    const hello = Parser([]const u8).init(prefix("hello").run);
-    const space = Parser([]const u8).init(prefix(" ").run);
-    const world = Parser([]const u8).init(prefix("world").run);
+    const hello = StringParser.init(string("hello"));
+    const space = StringParser.init(string(" "));
+    const world = StringParser.init(string("world"));
     const parser = hello.takeLeft(space).apply([]const u8, world);
     const result = parser.run(Input.init("hello world"));
     try t.expectEqualStrings("", result.remaining.text);
@@ -296,6 +312,19 @@ test "Altogether now" {
         .value => |val| {
             try t.expectEqualStrings("hello", val[0]);
             try t.expectEqualStrings("world", val[1]);
+        },
+        .err => try t.expect(false),
+    }
+}
+
+test "Alternative" {
+    const hello = StringParser.init(string("hello"));
+    const world = StringParser.init(string("world"));
+    const result = hello.alternative(world).run(Input.init("world"));
+    try t.expectEqualStrings("", result.remaining.text);
+    switch (result.value) {
+        .value => |val| {
+            try t.expectEqualStrings("world", val);
         },
         .err => try t.expect(false),
     }

@@ -1,6 +1,10 @@
 const std = @import("std");
 
-const ParseErrorTag = union(enum) { PrefixMismatch };
+const ParseErrorTag = union(enum) {
+    FailedToMatch: void,
+    IndexOutOfBounds: usize,
+    ManyFailedToAllocate: std.mem.Allocator.Error,
+};
 
 pub const Input = struct {
     text: []const u8,
@@ -59,6 +63,20 @@ fn ParseResult(T: type) type {
             return .{
                 .remaining = rem,
                 .value = .{ .err = parse_err },
+            };
+        }
+
+        pub fn is_ok(self: @This()) bool {
+            return switch (self.value) {
+                .err => false,
+                .value => true,
+            };
+        }
+
+        pub fn is_err(self: @This()) bool {
+            return switch (self.value) {
+                .err => true,
+                .value => false,
             };
         }
     };
@@ -164,10 +182,40 @@ pub fn Parser(T: type) type {
 
             return Self.init(runner.run);
         }
+
+        pub fn many(self: Self, alloc: std.mem.Allocator) Parser(std.ArrayList(T)) {
+            const Result = ParseResult(std.ArrayList(T));
+            const runner = struct {
+                pub fn run(input: Input) Result {
+                    var out: std.ArrayList(T) = std.ArrayList(T).init(alloc);
+                    var result = self.run(input);
+                    while (result.is_ok()) : (result = self.run(result.remaining)) {
+                        switch (result.value) {
+                            // Unreachable due to the check above
+                            .err => unreachable,
+                            .value => |val| {
+                                out.append(val) catch |err| {
+                                    out.deinit();
+                                    return Result.err(input, .{
+                                        .description = "Failed to allocate during `many`!",
+                                        .tag = .{ .ManyFailedToAllocate = err },
+                                    });
+                                };
+                            },
+                        }
+                    }
+
+                    return Result.ok(result.remaining, out);
+                }
+            };
+
+            return Parser(std.ArrayList(T)).init(runner.run);
+        }
     };
 }
 
 const ParseStringResult = ParseResult([]const u8);
+const StringParser = Parser([]const u8);
 
 pub fn identity(input: Input) ParseStringResult {
     return ParseStringResult.ok(input, "");
@@ -191,7 +239,32 @@ pub fn string(str: []const u8) Run([]const u8) {
             } else {
                 return ParseStringResult.err(input, .{
                     .description = "Prefix did not match",
-                    .tag = ParseErrorTag.PrefixMismatch,
+                    .tag = ParseErrorTag.FailedToMatch,
+                });
+            }
+        }
+    };
+    return runner.run;
+}
+
+pub fn char(c: u8) Run(u8) {
+    const Result = ParseResult(u8);
+    const runner = struct {
+        fn run(input: Input) Result {
+            if (input.text.len < 0) {
+                return Result.err(input, .{
+                    .description = "No more input left to read",
+                    .tag = .IndexOutOfBounds(0),
+                });
+            } else if (input.text[0] == c) {
+                return Result.ok(
+                    .{ .pos = input.pos + 1, .text = input.text[1..] },
+                    c,
+                );
+            } else {
+                return Result.err(input, .{
+                    .description = "First character did not match",
+                    .tag = .FailedToMatch,
                 });
             }
         }
@@ -200,8 +273,6 @@ pub fn string(str: []const u8) Run([]const u8) {
 }
 
 const t = std.testing;
-
-const StringParser = Parser([]const u8);
 
 test "Can create and run a parser" {
     const parser = StringParser.init(identity);
@@ -255,7 +326,7 @@ test "Prefix fails" {
     switch (result.value) {
         .value => try t.expect(false),
         .err => |err| {
-            try t.expectEqual(ParseErrorTag.PrefixMismatch, err.tag);
+            try t.expectEqual(ParseErrorTag.FailedToMatch, err.tag);
         },
     }
 }
@@ -327,5 +398,19 @@ test "Alternative" {
             try t.expectEqualStrings("world", val);
         },
         .err => try t.expect(false),
+    }
+}
+
+test "Many" {
+    const space = Parser(u8).init(char(' '));
+    const spaces = space.many(t.allocator);
+    const result = spaces.run(Input.init("     abc"));
+    try t.expectEqualStrings("abc", result.remaining.text);
+    switch (result.value) {
+        .err => try t.expect(false),
+        .value => |val| {
+            defer val.deinit();
+            try t.expectEqual(5, val.items.len);
+        },
     }
 }

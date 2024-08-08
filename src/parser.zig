@@ -111,7 +111,7 @@ pub fn Parser(T: type) type {
             return Parser(U).init(runner.run);
         }
 
-        pub fn takeLeft(self: Self, other: anytype) Self {
+        pub fn ignore(self: Self, other: anytype) Self {
             const runner = struct {
                 pub fn run(input: Input) ParseResult(T) {
                     const result = self.run(input);
@@ -131,7 +131,7 @@ pub fn Parser(T: type) type {
             return Parser(T).init(runner.run);
         }
 
-        pub fn takeRight(self: Self, U: type, other: Parser(U)) Parser(U) {
+        pub fn ignored(self: Self, U: type, other: Parser(U)) Parser(U) {
             const runner = struct {
                 pub fn run(input: Input) ParseResult(T) {
                     const result = self.run(input);
@@ -331,10 +331,10 @@ test "Prefix fails" {
     }
 }
 
-test "takeLeft" {
+test "ignore" {
     const parser = StringParser.init(string("hello"));
     const other = StringParser.init(string(" world"));
-    const result = parser.takeLeft(other).run(Input.init("hello world"));
+    const result = parser.ignore(other).run(Input.init("hello world"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {
         .value => |val| {
@@ -344,10 +344,10 @@ test "takeLeft" {
     }
 }
 
-test "takeRight" {
+test "ignored" {
     const parser = StringParser.init(string(" "));
     const other = StringParser.init(string("world"));
-    const result = parser.takeRight([]const u8, other).run(Input.init(" world"));
+    const result = parser.ignored([]const u8, other).run(Input.init(" world"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {
         .value => |val| {
@@ -376,7 +376,7 @@ test "Altogether now" {
     const hello = StringParser.init(string("hello"));
     const space = StringParser.init(string(" "));
     const world = StringParser.init(string("world"));
-    const parser = hello.takeLeft(space).apply([]const u8, world);
+    const parser = hello.ignore(space).apply([]const u8, world);
     const result = parser.run(Input.init("hello world"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {

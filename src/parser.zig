@@ -4,6 +4,7 @@ const ParseErrorTag = union(enum) {
     FailedToMatch: void,
     IndexOutOfBounds: usize,
     ManyFailedToAllocate: std.mem.Allocator.Error,
+    Other: anyerror,
 };
 
 pub const Input = struct {
@@ -23,11 +24,11 @@ const ParseError = struct {
     tag: ParseErrorTag,
 };
 
-fn Run(T: type) type {
+pub fn Run(T: type) type {
     return fn (Input) ParseResult(T);
 }
 
-fn Runner(T: type) type {
+pub fn Runner(T: type) type {
     return struct {
         run: Run(T),
     };
@@ -40,7 +41,7 @@ pub fn ParseValue(T: type) type {
     };
 }
 
-fn ParseResult(T: type) type {
+pub fn ParseResult(T: type) type {
     return struct {
         remaining: Input,
         value: ParseValue(T),
@@ -79,8 +80,28 @@ fn ParseResult(T: type) type {
                 .value => false,
             };
         }
+
+        pub fn map(self: @This(), U: type, f: fn (T) U) ParseResult(U) {
+            return switch (self.value) {
+                .err => |erro| ParseResult(U).init(self.remaining, .{ .err = erro }),
+                .value => |val| ParseResult(U).ok(self.remaining, f(val)),
+            };
+        }
+
+        pub fn except(self: @This(), U: type, f: fn (T) anyerror!U) ParseResult(U) {
+            return switch (self.value) {
+                .err => |erro| ParseResult(U).init(self.remaining, .{ .err = erro }),
+                .value => |val| {
+                    const result = f(val) catch |erro| {
+                        return ParseResult(U).err(self.remaining, .{ .Other = erro });
+                    };
+                    return ParseResult(U).ok(self.remaining, result);
+                },
+            };
+        }
     };
 }
+
 pub fn Parser(T: type) type {
     return struct {
         const Self = @This();
@@ -97,14 +118,47 @@ pub fn Parser(T: type) type {
             const runner = struct {
                 pub fn run(input: Input) ParseResult(U) {
                     const result = self.run(input);
-                    switch (result.value) {
+                    return result.map(U, f);
+                }
+            };
+
+            return Parser(U).init(runner.run);
+        }
+
+        pub fn except(self: Self, U: type, f: fn (T) anyerror!U) Parser(U) {
+            const runner = struct {
+                fn run(input: Input) ParseResult(U) {
+                    const result = self.run(input);
+                    return switch (result.value) {
+                        .err => |err| ParseResult(U).err(result.remaining, err),
                         .value => |val| {
-                            return ParseResult(U).init(result.remaining, .{ .value = f(val) });
+                            const final = f(val) catch |err| {
+                                return ParseResult(U).err(
+                                    result.remaining,
+                                    .{
+                                        .description = "Something went wrong!",
+                                        .tag = .{ .Other = err },
+                                    },
+                                );
+                            };
+
+                            return ParseResult(U).ok(result.remaining, final);
                         },
-                        .err => |err| {
-                            return ParseResult(U).init(input, .{ .err = err });
-                        },
-                    }
+                    };
+                }
+            };
+
+            return Parser(U).init(runner.run);
+        }
+
+        pub fn apply(self: Self, U: type, f: fn (ParseResult(T)) ParseResult(U)) Parser(U) {
+            const runner = struct {
+                pub fn run(input: Input) ParseResult(U) {
+                    const result = self.run(input);
+                    return switch (result.value) {
+                        .err => |err| ParseResult(U).err(result.remaining, err),
+                        .value => |val| f(val),
+                    };
                 }
             };
 
@@ -147,7 +201,7 @@ pub fn Parser(T: type) type {
             return Parser(U).init(runner.run);
         }
 
-        pub fn apply(self: Self, U: type, other: Parser(U)) Parser(std.meta.Tuple(&[_]type{ T, U })) {
+        pub fn keep(self: Self, U: type, other: Parser(U)) Parser(std.meta.Tuple(&[_]type{ T, U })) {
             const Tuple = std.meta.Tuple(&[_]type{ T, U });
             const runner = struct {
                 const Result = ParseResult(Tuple);
@@ -214,8 +268,9 @@ pub fn Parser(T: type) type {
     };
 }
 
-const ParseStringResult = ParseResult([]const u8);
-const StringParser = Parser([]const u8);
+pub const ParseStringResult = ParseResult([]const u8);
+pub const ParseVoidResult = ParseResult(void);
+pub const StringParser = Parser([]const u8);
 
 pub fn identity(input: Input) ParseStringResult {
     return ParseStringResult.ok(input, "");
@@ -242,6 +297,85 @@ pub fn string(str: []const u8) Run([]const u8) {
                     .tag = ParseErrorTag.FailedToMatch,
                 });
             }
+        }
+    };
+    return runner.run;
+}
+
+pub fn ignoreChar(c: u8) Run(void) {
+    const runner = struct {
+        fn run(input: Input) ParseVoidResult {
+            if (input.text.len > 0 and input.text[0] == c) {
+                return ParseVoidResult.ok(
+                    Input{
+                        .pos = input.pos + 1,
+                        .text = input.text[1..],
+                    },
+                    void,
+                );
+            } else {
+                return ParseVoidResult.err(
+                    input,
+                    .{
+                        .description = "Char did not match",
+                        .tag = ParseErrorTag.FailedToMatch,
+                    },
+                );
+            }
+        }
+    };
+
+    return runner.run;
+}
+
+pub fn ignoreWhile(f: fn (u8) bool) Run(void) {
+    const runner = struct {
+        fn run(input: Input) ParseVoidResult {
+            var i = input;
+
+            while (i.text.len > 0 and f(i.text[0])) {
+                i = Input{
+                    .pos = i.pos + 1,
+                    .text = i.text[1..],
+                };
+            }
+
+            return ParseStringResult.ok(i, void);
+        }
+    };
+    return runner.run;
+}
+
+pub fn parseWhile(alloc: std.mem.Allocator, f: fn (u8) bool) Run([]const u8) {
+    const runner = struct {
+        fn run(input: Input) ParseStringResult {
+            var buf = std.ArrayList(u8).init(alloc);
+            var i = input;
+
+            while (i.text.len > 0 and f(i.text[0])) {
+                buf.append(i.text[0]) catch |err| {
+                    buf.deinit();
+                    return ParseStringResult.err(input, .{
+                        .description = "Failed to allocate during `parseWhile`!",
+                        .tag = .{ .ManyFailedToAllocate = err },
+                    });
+                };
+
+                i = Input{
+                    .pos = i.pos + 1,
+                    .text = i.text[1..],
+                };
+            }
+
+            const s = buf.toOwnedSlice() catch |err| {
+                buf.deinit();
+                return ParseStringResult.err(input, .{
+                    .description = "Failed to allocate during `parseWhile`!",
+                    .tag = .{ .ManyFailedToAllocate = err },
+                });
+            };
+
+            return ParseStringResult.ok(i, s);
         }
     };
     return runner.run;
@@ -357,10 +491,10 @@ test "ignored" {
     }
 }
 
-test "Apply" {
+test "Keep" {
     const parser = StringParser.init(string("hello"));
     const other = StringParser.init(string("world"));
-    const applied = parser.apply([]const u8, other);
+    const applied = parser.keep([]const u8, other);
     const result = applied.run(Input.init("helloworld"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {
@@ -376,7 +510,7 @@ test "Altogether now" {
     const hello = StringParser.init(string("hello"));
     const space = StringParser.init(string(" "));
     const world = StringParser.init(string("world"));
-    const parser = hello.ignore(space).apply([]const u8, world);
+    const parser = hello.ignore(space).keep([]const u8, world);
     const result = parser.run(Input.init("hello world"));
     try t.expectEqualStrings("", result.remaining.text);
     switch (result.value) {
@@ -411,6 +545,19 @@ test "Many" {
         .value => |val| {
             defer val.deinit();
             try t.expectEqual(5, val.items.len);
+        },
+    }
+}
+
+test "parseWhile" {
+    const digits = Parser([]const u8).init(parseWhile(t.allocator, std.ascii.isDigit));
+    const result = digits.run(Input.init("1234 5678"));
+    try t.expectEqualStrings(" 5678", result.remaining.text);
+    switch (result.value) {
+        .err => try t.expect(false),
+        .value => |val| {
+            defer t.allocator.free(val);
+            try t.expectEqualStrings("1234", val);
         },
     }
 }
